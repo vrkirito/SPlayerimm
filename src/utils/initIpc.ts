@@ -1,8 +1,10 @@
 import { usePlayerController } from "@/core/player/PlayerController";
-import { useDataStore, useMusicStore, useStatusStore } from "@/stores";
-import { SettingType } from "@/types/main";
+import * as playerIpc from "@/core/player/PlayerIpc";
+import { useDataStore, useMusicStore, useSettingStore, useStatusStore } from "@/stores";
+import type { SettingType } from "@/types/main";
 import { handleProtocolUrl } from "@/utils/protocol";
 import { cloneDeep } from "lodash-es";
+import { toRaw } from "vue";
 import { toLikeSong } from "./auth";
 import { isElectron } from "./env";
 import { getPlayerInfoObj } from "./format";
@@ -50,6 +52,58 @@ const initIpc = () => {
     window.electron.ipcRenderer.on("toggle-desktop-lyric", () => player.toggleDesktopLyric());
     // 显式关闭桌面歌词
     window.electron.ipcRenderer.on("close-desktop-lyric", () => player.setDesktopLyricShow(false));
+    // 任务栏歌词开关
+    window.electron.ipcRenderer.on("toggle-taskbar-lyric", () => player.toggleTaskbarLyric());
+    // 给任务栏歌词初始数据
+    window.electron.ipcRenderer.on("taskbar:request-data", () => {
+      const musicStore = useMusicStore();
+      const statusStore = useStatusStore();
+      const settingStore = useSettingStore();
+      const { name, artist } = getPlayerInfoObj() || {};
+      const cover = musicStore.playSong?.cover || "";
+
+      playerIpc.sendTaskbarMetadata({
+        title: name || "",
+        artist: artist || "",
+        cover,
+      });
+      playerIpc.sendTaskbarState({
+        isPlaying: statusStore.playStatus,
+      });
+
+      // 发送歌词数据
+      playerIpc.sendTaskbarLyrics(musicStore.songLyric);
+
+      // 发送设置
+      window.electron.ipcRenderer.send(
+        "taskbar:set-show-cover",
+        settingStore.taskbarLyricShowCover,
+      );
+      window.electron.ipcRenderer.send("taskbar:set-max-width", settingStore.taskbarLyricMaxWidth);
+      window.electron.ipcRenderer.send("taskbar:set-position", settingStore.taskbarLyricPosition);
+      window.electron.ipcRenderer.send(
+        "taskbar:set-show-when-paused",
+        settingStore.taskbarLyricShowWhenPaused,
+      );
+      window.electron.ipcRenderer.send(
+        "taskbar:set-auto-shrink",
+        settingStore.taskbarLyricAutoShrink,
+      );
+      window.electron.ipcRenderer.send("taskbar:broadcast-settings", {
+        animationMode: settingStore.taskbarLyricAnimationMode,
+        singleLineMode: settingStore.taskbarLyricSingleLineMode,
+        lyricFont: settingStore.LyricFont,
+        globalFont: settingStore.globalFont,
+        fontWeight: settingStore.taskbarLyricFontWeight,
+      });
+
+      playerIpc.sendTaskbarProgressData({
+        currentTime: statusStore.currentTime * 1000,
+        duration: statusStore.duration * 1000,
+        offset: statusStore.getSongOffset(musicStore.playSong?.id),
+      });
+    });
+
     // 请求歌词数据
     window.electron.ipcRenderer.on("request-desktop-lyric-data", () => {
       const musicStore = useMusicStore();
@@ -68,6 +122,7 @@ const initIpc = () => {
             lrcData: musicStore.songLyric.lrcData ?? [],
             yrcData: musicStore.songLyric.yrcData ?? [],
             lyricIndex: statusStore.lyricIndex,
+            lyricLoading: statusStore.lyricLoading,
           }),
         );
       }
@@ -100,7 +155,9 @@ const initIpc = () => {
       const { name, artist, album } = getPlayerInfoObj() || {};
       // 获取原始对象
       const playSong = toRaw(musicStore.playSong);
-      const songLyric = toRaw(musicStore.songLyric);
+      const songLyric = statusStore.lyricLoading
+        ? { lrcData: [], yrcData: [] }
+        : toRaw(musicStore.songLyric);
       window.electron.ipcRenderer.send(
         "return-track-info",
         cloneDeep({
@@ -113,6 +170,9 @@ const initIpc = () => {
           volume: statusStore.playVolume,
           playRate: statusStore.playRate,
           ...playSong,
+          // 歌词及加载状态
+          lyricLoading: statusStore.lyricLoading,
+          lyricIndex: statusStore.lyricIndex,
           ...songLyric,
         }),
       );
